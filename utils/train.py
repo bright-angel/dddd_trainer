@@ -148,7 +148,7 @@ class Train:
                         if self.net.backbone.startswith("effnet"):
                             self.net.cnn.set_swish(memory_efficient=False)
                         self.net = self.net.eval().cpu()
-                        dynamic_ax = {'input1': {3: 'image_wdith'}, "output": {1: 'seq'}}
+                        dynamic_ax = {'input1': {3: 'image_wdith'}, "output": {0: 'seq'}}
                         self.net.export_onnx(self.net, dummy_input,
                                              os.path.join(self.models_path, "{}_{}_{}_{}_{}.onnx".format(
                                                  self.project_name, str(accuracy), self.epoch, self.step,

@@ -1,4 +1,5 @@
 import json
+import os
 
 from .backbone import *
 import torch
@@ -9,6 +10,28 @@ import numpy as np
 
 np.random.seed(0)
 torch.manual_seed(0)
+
+
+class OnnxExportNet(torch.nn.Module):
+    """导出给 ddddocr 的推理图。
+
+    ddddocr 加载自定义模型时：输入是像素除以 255 的 [0,1] 张量且不会做训练里的
+    mean/std 归一化，输出必须是 [time_step, batch, charset] 的 logits，由它自己
+    argmax + CTC 解码。因此这里归一化折算进图，并绕开 Net.forward 的 argmax。
+    """
+
+    def __init__(self, net):
+        super(OnnxExportNet, self).__init__()
+        self.net = net
+        if net.image_channel == 1:
+            mean, std = [0.456], [0.224]
+        else:
+            mean, std = [0.485, 0.456, 0.406], [0.229, 0.224, 0.225]
+        self.register_buffer("mean", torch.tensor(mean, dtype=torch.float32).view(1, -1, 1, 1))
+        self.register_buffer("std", torch.tensor(std, dtype=torch.float32).view(1, -1, 1, 1))
+
+    def forward(self, inputs):
+        return self.net.get_features((inputs - self.mean) / self.std)
 
 
 class Net(torch.nn.Module):
@@ -213,9 +236,28 @@ class Net(torch.nn.Module):
         return torch.randn(1, self.image_channel, h, w, device='cpu')
 
     def export_onnx(self, net, dummy_input, graph_path, input_names, output_names, dynamic_ax):
-        torch.onnx.export(net, dummy_input, graph_path, export_params=True, verbose=False,
-                          input_names=input_names, output_names=output_names, dynamic_axes=dynamic_ax,
-                          opset_version=12, do_constant_folding=True)
+        export_args = dict(export_params=True, verbose=False,
+                           input_names=input_names, output_names=output_names, dynamic_axes=dynamic_ax,
+                           opset_version=12, do_constant_folding=True)
+        export_net = OnnxExportNet(net)
+        try:
+            # torch>=2.6 起 torch.onnx.export 默认 dynamo=True，会把权重写进同名的
+            # <model>.onnx.data 外置文件，单独拷走 .onnx 就无法加载，这里固定走旧导出器
+            torch.onnx.export(export_net, dummy_input, graph_path, dynamo=False, **export_args)
+        except TypeError:
+            torch.onnx.export(export_net, dummy_input, graph_path, **export_args)
+        self.inline_external_data(graph_path)
+
+    @staticmethod
+    def inline_external_data(graph_path, ir_version=7):
+        sidecar = graph_path + ".data"
+        if not os.path.exists(sidecar):
+            return
+        import onnx
+        model = onnx.load(graph_path, load_external_data=True)
+        model.ir_version = ir_version
+        onnx.save(model, graph_path, save_as_external_data=False)
+        os.remove(sidecar)
 
 
     @staticmethod
